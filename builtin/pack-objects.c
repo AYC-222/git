@@ -984,7 +984,17 @@ static void write_reused_pack(struct hashfile *f)
 				break;
 
 			offset += ewah_bit_ctz64(word >> offset);
-			write_reused_pack_one(pos + offset, f, &w_curs);
+			if (bitmap_is_midx(bitmap_git)) {
+				off_t pack_offs = bitmap_pack_offset(bitmap_git,
+								     pos + offset);
+				uint32_t pos;
+
+				if (offset_to_pack_pos(reuse_packfile, pack_offs, &pos) < 0)
+					die(_("write_reused_pack: could not locate %"PRIdMAX),
+					    (intmax_t)pack_offs);
+				write_reused_pack_one(pos, f, &w_curs);
+			} else
+				write_reused_pack_one(pos + offset, f, &w_curs);
 			display_progress(progress_state, ++written);
 		}
 	}
@@ -1030,7 +1040,7 @@ static void write_pack_file(void)
 	write_order = compute_write_order();
 
 	do {
-		struct object_id oid;
+		unsigned char hash[GIT_MAX_RAWSZ];
 		char *pack_tmp_name = NULL;
 
 		if (pack_to_stdout)
@@ -1059,13 +1069,13 @@ static void write_pack_file(void)
 		 * If so, rewrite it like in fast-import
 		 */
 		if (pack_to_stdout) {
-			finalize_hashfile(f, oid.hash, CSUM_HASH_IN_STREAM | CSUM_CLOSE);
+			finalize_hashfile(f, hash, CSUM_HASH_IN_STREAM | CSUM_CLOSE);
 		} else if (nr_written == nr_remaining) {
-			finalize_hashfile(f, oid.hash, CSUM_HASH_IN_STREAM | CSUM_FSYNC | CSUM_CLOSE);
+			finalize_hashfile(f, hash, CSUM_HASH_IN_STREAM | CSUM_FSYNC | CSUM_CLOSE);
 		} else {
-			int fd = finalize_hashfile(f, oid.hash, 0);
-			fixup_pack_header_footer(fd, oid.hash, pack_tmp_name,
-						 nr_written, oid.hash, offset);
+			int fd = finalize_hashfile(f, hash, 0);
+			fixup_pack_header_footer(fd, hash, pack_tmp_name,
+						 nr_written, hash, offset);
 			close(fd);
 			if (write_bitmap_index) {
 				if (write_bitmap_index != WRITE_BITMAP_QUIET)
@@ -1100,23 +1110,24 @@ static void write_pack_file(void)
 			strbuf_addf(&tmpname, "%s-", base_name);
 
 			if (write_bitmap_index) {
-				bitmap_writer_set_checksum(oid.hash);
+				bitmap_writer_set_checksum(hash);
 				bitmap_writer_build_type_index(
 					&to_pack, written_list, nr_written);
 			}
 
 			finish_tmp_packfile(&tmpname, pack_tmp_name,
 					    written_list, nr_written,
-					    &pack_idx_opts, oid.hash);
+					    &pack_idx_opts, hash);
 
 			if (write_bitmap_index) {
-				strbuf_addf(&tmpname, "%s.bitmap", oid_to_hex(&oid));
+				strbuf_addf(&tmpname, "%s.bitmap", hash_to_hex(hash));
 
 				stop_progress(&progress_state);
 
 				bitmap_writer_show_progress(progress);
 				bitmap_writer_select_commits(indexed_commits, indexed_commits_nr, -1);
-				bitmap_writer_build(&to_pack);
+				if (bitmap_writer_build(&to_pack) < 0)
+					die(_("failed to write bitmap index"));
 				bitmap_writer_finish(written_list, nr_written,
 						     tmpname.buf, write_bitmap_options);
 				write_bitmap_index = 0;
@@ -1124,7 +1135,7 @@ static void write_pack_file(void)
 
 			strbuf_release(&tmpname);
 			free(pack_tmp_name);
-			puts(oid_to_hex(&oid));
+			puts(hash_to_hex(hash));
 		}
 
 		/* mark written objects as written to previous pack */
@@ -3479,6 +3490,7 @@ static void loosen_unused_packed_objects(void)
 {
 	struct packed_git *p;
 	uint32_t i;
+	uint32_t loosened_objects_nr = 0;
 	struct object_id oid;
 
 	for (p = get_all_packs(the_repository); p; p = p->next) {
@@ -3492,11 +3504,16 @@ static void loosen_unused_packed_objects(void)
 			nth_packed_object_id(&oid, p, i);
 			if (!packlist_find(&to_pack, &oid) &&
 			    !has_sha1_pack_kept_or_nonlocal(&oid) &&
-			    !loosened_object_can_be_discarded(&oid, p->mtime))
+			    !loosened_object_can_be_discarded(&oid, p->mtime)) {
 				if (force_object_loose(&oid, p->mtime))
 					die(_("unable to force loose object"));
+				loosened_objects_nr++;
+			}
 		}
 	}
+
+	trace2_data_intmax("pack-objects", the_repository,
+			   "loosen_unused_packed_objects/loosened", loosened_objects_nr);
 }
 
 /*
@@ -3861,6 +3878,8 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 	if (pack_to_stdout != !base_name || argc)
 		usage_with_options(pack_usage, pack_objects_options);
 
+	if (depth < 0)
+		depth = 0;
 	if (depth >= (1 << OE_DEPTH_BITS)) {
 		warning(_("delta chain depth %d is too deep, forcing %d"),
 			depth, (1 << OE_DEPTH_BITS) - 1);
@@ -3871,6 +3890,8 @@ int cmd_pack_objects(int argc, const char **argv, const char *prefix)
 			(1U << OE_Z_DELTA_BITS) - 1);
 		cache_max_small_delta_size = (1U << OE_Z_DELTA_BITS) - 1;
 	}
+	if (window < 0)
+		window = 0;
 
 	strvec_push(&rp, "pack-objects");
 	if (thin) {

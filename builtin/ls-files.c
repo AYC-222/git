@@ -210,7 +210,7 @@ static void show_submodule(struct repository *superproject,
 {
 	struct repository subrepo;
 	const struct submodule *sub = submodule_from_path(superproject,
-							  &null_oid, path);
+							  null_oid(), path);
 
 	if (repo_submodule_init(&subrepo, superproject, sub))
 		return;
@@ -751,6 +751,9 @@ int cmd_ls_files(int argc, const char **argv, const char *cmd_prefix)
 	/* Treat unmatching pathspec elements as errors */
 	if (pathspec.nr && error_unmatch)
 		ps_matched = xcalloc(pathspec.nr, 1);
+
+	if ((dir.flags & DIR_SHOW_IGNORED) && !show_others && !show_cached)
+		die("ls-files --ignored is usually used with --others, but --cached is the default.  Please specify which you want.");
 
 	if ((dir.flags & DIR_SHOW_IGNORED) && !exc_given)
 		die("ls-files --ignored needs some exclude pattern");

@@ -370,16 +370,20 @@ struct cache_entry *make_empty_cache_entry(struct index_state *istate,
 					   size_t name_len);
 
 /*
- * Create a cache_entry that is not intended to be added to an index.
- * Caller is responsible for discarding the cache_entry
- * with `discard_cache_entry`.
+ * Create a cache_entry that is not intended to be added to an index. If
+ * `ce_mem_pool` is not NULL, the entry is allocated within the given memory
+ * pool. Caller is responsible for discarding "loose" entries with
+ * `discard_cache_entry()` and the memory pool with
+ * `mem_pool_discard(ce_mem_pool, should_validate_cache_entries())`.
  */
 struct cache_entry *make_transient_cache_entry(unsigned int mode,
 					       const struct object_id *oid,
 					       const char *path,
-					       int stage);
+					       int stage,
+					       struct mem_pool *ce_mem_pool);
 
-struct cache_entry *make_empty_transient_cache_entry(size_t name_len);
+struct cache_entry *make_empty_transient_cache_entry(size_t len,
+						     struct mem_pool *ce_mem_pool);
 
 /*
  * Discard cache entry.
@@ -643,9 +647,10 @@ int path_inside_repo(const char *prefix, const char *path);
 #define INIT_DB_EXIST_OK 0x0002
 
 int init_db(const char *git_dir, const char *real_git_dir,
-	    const char *template_dir, int hash_algo,
-	    const char *initial_branch, unsigned int flags);
-void initialize_repository_version(int hash_algo, int reinit);
+	    const char *template_dir, int hash_algo, const char *initial_branch,
+	    const char *ref_storage_format, unsigned int flags);
+void initialize_repository_version(int hash_algo, int reinit,
+				   const char *ref_storage_format);
 
 void sanitize_stdfds(void);
 int daemonize(void);
@@ -847,6 +852,14 @@ int remove_file_from_index(struct index_state *, const char *path);
  */
 int add_to_index(struct index_state *, const char *path, struct stat *, int flags);
 int add_file_to_index(struct index_state *, const char *path, int flags);
+
+#define ADD_TO_INDEX_CACHEINFO_INVALID_PATH (-1)
+#define ADD_TO_INDEX_CACHEINFO_UNABLE_TO_ADD (-2)
+
+int add_to_index_cacheinfo(struct index_state *, unsigned int mode,
+			   const struct object_id *oid, const char *path,
+			   int stage, int allow_add, int allow_replace,
+			   struct cache_entry **ce_ret);
 
 int chmod_index_entry(struct index_state *, struct cache_entry *ce, char flip);
 int ce_same_name(const struct cache_entry *a, const struct cache_entry *b);
@@ -1063,6 +1076,7 @@ struct repository_format {
 	int hash_algo;
 	int sparse_index;
 	char *work_tree;
+	char *ref_storage;
 	struct string_list unknown_extensions;
 	struct string_list v1_only_extensions;
 };
@@ -1272,6 +1286,7 @@ int is_ntfs_dotgit(const char *name);
 int is_ntfs_dotgitmodules(const char *name);
 int is_ntfs_dotgitignore(const char *name);
 int is_ntfs_dotgitattributes(const char *name);
+int is_ntfs_dotmailmap(const char *name);
 
 /*
  * Returns true iff "str" could be confused as a command-line option when
@@ -1838,7 +1853,7 @@ int checkout_fast_forward(struct repository *r,
 			  const struct object_id *from,
 			  const struct object_id *to,
 			  int overwrite_ignore);
-
+char *merge_get_better_branch_name(const char *branch);
 
 int sane_execvp(const char *file, char *const argv[]);
 
